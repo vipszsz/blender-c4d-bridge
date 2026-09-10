@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+_archive/
+dist/
+*.c4dbridge
+*.blend1

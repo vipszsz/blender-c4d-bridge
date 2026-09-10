@@ -1,0 +1,17 @@
+schema_version = "1.0.0"
+
+id = "camera_bridge_c4d"
+version = "2.0.1"
+name = "Cinema 4D Bridge"
+tagline = "Export scenes, cameras and marker camera cuts to Cinema 4D"
+maintainer = "Camera Bridge"
+type = "add-on"
+
+blender_version_min = "4.2.0"
+
+license = ["SPDX:GPL-3.0-or-later"]
+
+tags = ["Camera", "Import-Export", "Animation"]
+
+[permissions]
+files = "Writes the exported scene to a .c4dbridge file"
