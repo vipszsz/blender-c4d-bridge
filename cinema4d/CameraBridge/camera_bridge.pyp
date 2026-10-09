@@ -37,9 +37,9 @@ FILM_OFFSET_Y_SIGN = -1.0
 ORTHO_REFERENCE_WIDTH = 1024.0
 
 # Tolerances for lossless key reduction.
-EPS_POSITION = 1e-5   # Blender units (0.001 cm at the default scale); scaled with the import
-EPS_ROTATION = 1e-6   # radians
-EPS_SCALE = 1e-6
+EPS_POSITION = 1e-7   # Blender units; scaled with the import (parents may magnify it)
+EPS_ROTATION = 1e-7   # radians
+EPS_SCALE = 1e-8
 EPS_LENS = 1e-4       # millimetres
 EPS_OTHER = 1e-4
 ZERO_SCALE = 1e-9
@@ -349,6 +349,111 @@ class Keyer:
             self.keys += 1
 
 
+# ---------------------------------------------------------------------------
+# Original Blender keyframes (instead of one key per frame)
+# ---------------------------------------------------------------------------
+#
+# Blender's local channels map onto Cinema 4D's one-to-one once the axes are
+# swapped: position and scale only trade Y and Z, and every Blender Euler order
+# has an exact Cinema 4D rotation order with H <- X, P <- Z, B <- Y. Cameras and
+# lights look down -Z in Blender and +Z here; that quarter turn folds into H.
+# (Both tables were derived by matching matrices against Cinema 4D itself.)
+
+HALF_PI = 1.5707963267948966
+
+CURVE_ROTATION = {
+    "XYZ": ("ROTATIONORDER_XZYGLOBAL", ((0, 1.0, 0.0), (2, 1.0, 0.0), (1, 1.0, 0.0))),
+    "XZY": ("ROTATIONORDER_XYZGLOBAL", ((0, 1.0, 0.0), (2, 1.0, 0.0), (1, 1.0, 0.0))),
+    "YXZ": ("ROTATIONORDER_YXZLOCAL", ((0, 1.0, 0.0), (2, 1.0, 0.0), (1, 1.0, 0.0))),
+    "YZX": ("ROTATIONORDER_XYZLOCAL", ((0, 1.0, 0.0), (2, 1.0, 0.0), (1, 1.0, 0.0))),
+    "ZXY": ("ROTATIONORDER_YXZGLOBAL", ((0, 1.0, 0.0), (2, 1.0, 0.0), (1, 1.0, 0.0))),
+    "ZYX": ("ROTATIONORDER_XZYLOCAL", ((0, 1.0, 0.0), (2, 1.0, 0.0), (1, 1.0, 0.0))),
+}
+CURVE_ROTATION_VIEW = {
+    "XYZ": ("ROTATIONORDER_XZYGLOBAL", ((0, 1.0, -HALF_PI), (2, 1.0, 0.0), (1, 1.0, 0.0))),
+    "XZY": ("ROTATIONORDER_XYZGLOBAL", ((0, 1.0, -HALF_PI), (2, 1.0, 0.0), (1, 1.0, 0.0))),
+    "YZX": ("ROTATIONORDER_XZYLOCAL", ((0, 1.0, -HALF_PI), (1, 1.0, 0.0), (2, -1.0, 0.0))),
+    "ZYX": ("ROTATIONORDER_XYZLOCAL", ((0, 1.0, -HALF_PI), (1, 1.0, 0.0), (2, -1.0, 0.0))),
+}
+# (Blender index, Cinema 4D component) for position and scale.
+CURVE_VECTOR = ((0, "VECTOR_X"), (2, "VECTOR_Y"), (1, "VECTOR_Z"))
+CURVE_INTERPOLATION = {"B": "CINTERPOLATION_SPLINE", "L": "CINTERPOLATION_LINEAR", "C": "CINTERPOLATION_STEP"}
+CURVE_KEY_BITS = (("NBIT_CKEY_AUTO", False), ("NBIT_CKEY_CLAMP", False), ("NBIT_CKEY_AUTOWEIGHT", False),
+                  ("NBIT_CKEY_BREAK", True), ("NBIT_CKEY_WEIGHTEDTANGENT", True))
+
+
+def frame_time(frame, fps, precision=10000):
+    """Exact BaseTime for a (possibly fractional) frame: a float BaseTime would be
+    quantised to 1/100 s and visibly change tangents."""
+    return c4d.BaseTime(int(round(frame * precision)), int(fps * precision))
+
+
+def write_curve_track(obj, descid, keys, factor, offset, keyer):
+    """One Cinema 4D track holding Blender's keys, tangents and interpolation."""
+    remove_track(obj, descid)
+    track = c4d.CTrack(obj, descid)
+    obj.InsertTrackSorted(track)
+    curve = track.GetCurve()
+    fps = float(keyer.fps)
+    for entry in keys:
+        key = curve.AddKey(frame_time(entry["f"] + keyer.offset, fps))["key"]
+        key.SetValue(curve, factor * entry["v"] + offset)
+        key.SetInterpolation(curve, getattr(c4d, CURVE_INTERPOLATION.get(entry.get("i", "B"),
+                                                                        "CINTERPOLATION_SPLINE")))
+        for name, state in CURVE_KEY_BITS:  # keep our tangents instead of C4D's automatic ones
+            bit = getattr(c4d, name, None)
+            if bit is not None:
+                key.ChangeNBit(bit, c4d.NBITCONTROL_SET if state else c4d.NBITCONTROL_CLEAR)
+        left, right = entry.get("l") or (0.0, 0.0), entry.get("r") or (0.0, 0.0)
+        key.SetTimeLeft(curve, frame_time(left[0], fps))
+        key.SetValueLeft(curve, factor * left[1])
+        key.SetTimeRight(curve, frame_time(right[0], fps))
+        key.SetValueRight(curve, factor * right[1])
+        keyer.keys += 1
+    return len(keys)
+
+
+def curves_usable(entry, parent, opt):
+    """Can this object keep Blender's own keys?"""
+    curves = entry.get("curves")
+    if not (opt.keep_curves and curves):
+        return False
+    if parent is not None and parent.get("_kind") in ("camera", "light"):
+        return False
+    table = CURVE_ROTATION_VIEW if entry["_kind"] in ("camera", "light") else CURVE_ROTATION
+    return curves.get("order", "XYZ") in table
+
+
+def apply_curves(obj, entry, parent, keyer, opt, warnings):
+    """Rebuild Blender's own keyframes on this object. False = keep the baked keys."""
+    if not curves_usable(entry, parent, opt):
+        return False
+    curves = entry["curves"]
+    view = entry["_kind"] in ("camera", "light")
+    order_name, rotation_sources = (CURVE_ROTATION_VIEW if view else CURVE_ROTATION)[curves.get("order", "XYZ")]
+    obj[c4d.ID_BASEOBJECT_ROTATION_ORDER] = getattr(c4d, order_name)
+    static, channels = curves["static"], curves["channels"]
+
+    def put(param, component, value, keys, factor, offset=0.0):
+        descid = vector_id(param, component)
+        if keys:
+            write_curve_track(obj, descid, keys, factor, offset, keyer)
+        else:
+            remove_track(obj, descid)
+            obj.SetParameter(descid, factor * value + offset, c4d.DESCFLAGS_SET_NONE)
+
+    loc_keys, scale_keys = channels.get("loc", {}), channels.get("scale", {})
+    for index, component in CURVE_VECTOR:
+        comp = getattr(c4d, component)
+        put(c4d.ID_BASEOBJECT_REL_POSITION, comp, static["loc"][index], loc_keys.get(str(index)), opt.scale)
+        put(c4d.ID_BASEOBJECT_REL_SCALE, comp, static["scale"][index], scale_keys.get(str(index)), 1.0)
+    rot_keys = channels.get("rot", {})
+    for (index, sign, offset), component in zip(rotation_sources, ("VECTOR_X", "VECTOR_Y", "VECTOR_Z")):
+        put(c4d.ID_BASEOBJECT_REL_ROTATION, getattr(c4d, component), static["rot"][index],
+            rot_keys.get(str(index)), sign, offset)
+    return True
+
+
 def key_transform(obj, matrices, keyer):
     """Position, rotation (HPB, unwrapped) and scale keys from per-frame local matrices."""
     order = c4d.ROTATIONORDER_DEFAULT
@@ -372,13 +477,14 @@ def key_transform(obj, matrices, keyer):
 
 class Options:
     def __init__(self, scale=100.0, frame_offset=0, stage=True, markers=True,
-                 match_document=True, clipping=True):
+                 match_document=True, clipping=True, keep_curves=True):
         self.scale = scale
         self.frame_offset = frame_offset
         self.stage = stage
         self.markers = markers
         self.match_document = match_document
         self.clipping = clipping
+        self.keep_curves = keep_curves  # rebuild Blender's own keys instead of one key per frame
 
 
 def get_key(node):
@@ -869,6 +975,23 @@ def import_bundle(doc, bundle, opt):
             set_key(stage, "stage")
             nodes["stage"] = stage
 
+        # A rotating parent-inverse from Blender lives on a small static null, so the
+        # object itself can keep Blender's own channel values.
+        offsets = {}
+        for o in objects:
+            curves = o.get("curves") or {}
+            if curves.get("offset") and curves_usable(o, by_name.get(o.get("parent") or ""), opt):
+                key = "off:" + o["name"]
+                null, new_null = claim(key, f"{o['name']} · offset", "null")
+                null[c4d.NULLOBJECT_DISPLAY] = c4d.NULLOBJECT_DISPLAY_NONE
+                for param in (c4d.ID_BASEOBJECT_REL_POSITION, c4d.ID_BASEOBJECT_REL_ROTATION,
+                              c4d.ID_BASEOBJECT_REL_SCALE):
+                    for comp in (c4d.VECTOR_X, c4d.VECTOR_Y, c4d.VECTOR_Z):
+                        remove_track(null, vector_id(param, comp))
+                null.SetMl(c4d_local(curves["offset"], "P", "P", opt.scale))
+                nodes[key], is_new[key] = null, new_null
+                offsets[o["name"]] = key
+
         # Hierarchy: collections first, then objects, alphabetical like Blender's outliner
         children = {}
 
@@ -885,7 +1008,10 @@ def import_bundle(doc, bundle, opt):
             children.setdefault("col:" + col["parent"] if col.get("parent") in col_nodes else "root",
                                 []).append("col:" + col["name"])
         for o in sorted(objects, key=lambda o: o["name"].lower()):
-            children.setdefault(parent_key(o), []).append("obj:" + o["name"])
+            attach = offsets.get(o["name"], "obj:" + o["name"])
+            children.setdefault(parent_key(o), []).append(attach)
+            if attach != "obj:" + o["name"]:
+                children.setdefault(attach, []).append("obj:" + o["name"])
 
         def place(parent_obj, parent_key_):
             for key in children.get(parent_key_, []):
@@ -902,7 +1028,7 @@ def import_bundle(doc, bundle, opt):
 
         # Animation, parameters, geometry
         materials = Materials(doc, data.get("materials", []))
-        built, skipped_geo = {}, 0
+        built, skipped_geo, curve_objects = {}, 0, 0
         cams = {}
         total = len(objects)
         for count, o in enumerate(objects):
@@ -912,9 +1038,12 @@ def import_bundle(doc, bundle, opt):
             kind = o["_kind"]
             parent = by_name.get(o.get("parent") or "")
             parent_axes = axes_of(parent["_kind"]) if parent else "P"
-            rows = expand_rle(o["m"], n)
-            mats = [c4d_local(r, parent_axes, axes_of(kind), opt.scale) for r in rows]
-            key_transform(obj, mats, keyer)
+            if opt.keep_curves and apply_curves(obj, o, parent, keyer, opt, warnings):
+                curve_objects += 1
+            else:
+                rows = expand_rle(o["m"], n)
+                mats = [c4d_local(r, parent_axes, axes_of(kind), opt.scale) for r in rows]
+                key_transform(obj, mats, keyer)
 
             vis = expand_rle(o.get("hide_render", [[0, False]]), n)
             vis_id = long_id(c4d.ID_BASEOBJECT_VISIBILITY_RENDER)
@@ -950,7 +1079,7 @@ def import_bundle(doc, bundle, opt):
         n_cuts = key_stage(doc, stage, data, cams, keyer, warnings) if stage is not None else 0
         n_markers = add_markers(doc, data, keyer, root_name, warnings) if opt.markers else 0
 
-        stale = [obj for key, obj in index.items() if key not in touched and key.startswith(("obj:", "col:"))]
+        stale = [obj for key, obj in index.items() if key not in touched and key.startswith(("obj:", "col:", "off:"))]
         if stale:
             warnings.append(f"{plural(len(stale), 'object')} from an earlier import no longer exist in Blender "
                             f"and were left untouched (e.g. “{stale[0].GetName()}”).")
@@ -961,6 +1090,8 @@ def import_bundle(doc, bundle, opt):
         c4d.StatusClear()
 
     parts = []
+    if curve_objects:
+        parts.append(f"{curve_objects} with Blender's own keys")
     if created:
         parts.append(f"{created} new")
     if updated:
@@ -982,10 +1113,10 @@ ID_PATH, ID_BROWSE = 1001, 1002
 ID_SUMMARY, ID_SOURCE, ID_DETAILS = 1010, 1011, 1012
 ID_SCALE, ID_OFFSET, ID_SCALE_NOTE = 1020, 1021, 1022
 SCALE_NOTE = "cm per Blender unit (100 = real-world size)"
-ID_STAGE, ID_MARKERS, ID_MATCH, ID_CLIP = 1030, 1031, 1032, 1033
+ID_STAGE, ID_MARKERS, ID_MATCH, ID_CLIP, ID_CURVES = 1030, 1031, 1032, 1033, 1034
 ID_STATUS, ID_CANCEL, ID_IMPORT = 1040, 1041, 1042
 
-DEFAULTS = {"path": "", "scale": 100.0, "offset": 0, "stage": True, "markers": True,
+DEFAULTS = {"path": "", "curves": True, "scale": 100.0, "offset": 0, "stage": True, "markers": True,
             "match": True, "clip": True}
 
 
@@ -1046,6 +1177,8 @@ class ImportDialog(gui.GeDialog):
         self.AddStaticText(0, c4d.BFH_SCALEFIT, name="added to every key, cut and marker")
         self.GroupEnd()
 
+        self.AddCheckbox(ID_CURVES, c4d.BFH_LEFT, 0, 0,
+                         name="Keep Blender's keyframes (editable curves instead of one key per frame)")
         self.AddCheckbox(ID_STAGE, c4d.BFH_LEFT, 0, 0, name="Create Stage with camera cuts")
         self.AddCheckbox(ID_MARKERS, c4d.BFH_LEFT, 0, 0, name="Add timeline markers")
         self.AddCheckbox(ID_MATCH, c4d.BFH_LEFT, 0, 0, name="Match FPS, frame range and resolution")
@@ -1072,6 +1205,7 @@ class ImportDialog(gui.GeDialog):
             pass
         self.SetFloat(ID_SCALE, prefs["scale"], min=0.0001, max=1e6, step=1.0, format=c4d.FORMAT_FLOAT)
         self.SetInt32(ID_OFFSET, int(prefs["offset"]), min=-100000, max=100000)
+        self.SetBool(ID_CURVES, prefs.get("curves", True))
         self.SetBool(ID_STAGE, prefs["stage"])
         self.SetBool(ID_MARKERS, prefs["markers"])
         self.SetBool(ID_MATCH, prefs["match"])
@@ -1107,10 +1241,11 @@ class ImportDialog(gui.GeDialog):
     def _options(self):
         return Options(scale=self.GetFloat(ID_SCALE), frame_offset=self.GetInt32(ID_OFFSET),
                        stage=self.GetBool(ID_STAGE), markers=self.GetBool(ID_MARKERS),
-                       match_document=self.GetBool(ID_MATCH), clipping=self.GetBool(ID_CLIP))
+                       match_document=self.GetBool(ID_MATCH), clipping=self.GetBool(ID_CLIP),
+                       keep_curves=self.GetBool(ID_CURVES))
 
     def _save(self):
-        save_prefs({"path": self.GetString(ID_PATH), "scale": self.GetFloat(ID_SCALE),
+        save_prefs({"path": self.GetString(ID_PATH), "curves": self.GetBool(ID_CURVES), "scale": self.GetFloat(ID_SCALE),
                     "offset": self.GetInt32(ID_OFFSET), "stage": self.GetBool(ID_STAGE),
                     "markers": self.GetBool(ID_MARKERS), "match": self.GetBool(ID_MATCH),
                     "clip": self.GetBool(ID_CLIP)})

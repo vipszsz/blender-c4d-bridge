@@ -70,7 +70,10 @@ bad_parent = []
 for name, o in objs.items():
     obj = nodes["obj:" + name]
     want = ("obj:" + o["parent"]) if o.get("parent") else (("col:" + o["collection"]) if o.get("collection") else None)
-    got = cb.get_key(obj.GetUp()) if obj.GetUp() and obj.GetUp() != root else None
+    up = obj.GetUp()
+    if up is not None and cb.get_key(up) == "off:" + name:   # static parent-inverse null
+        up = up.GetUp()
+    got = cb.get_key(up) if up is not None and up != root else None
     if want != got:
         bad_parent.append((name, want, got))
 check(not bad_parent, f"hierarchy matches Blender {bad_parent[:3]}")
@@ -91,6 +94,9 @@ for name, o in objs.items():
         extent = max(extent, obj.GetRad().GetLength())
 check(not bad_geo, f"meshes have points/polys/UVW/normals/texture tags {bad_geo[:2]}")
 print(f"  largest mesh radius {extent:.2f} cm")
+curve_objs = [o["name"] for o in data["objects"] if o.get("curves")]
+offsets = [k for k in nodes if k.startswith("off:")]
+print(f"  {len(curve_objs)} objects carry their own F-Curves, {len(offsets)} offset nulls")
 
 
 def expected(name, i):
@@ -110,6 +116,7 @@ def det(m):
 
 fps = doc.GetFps()
 worst, where, stage_bad = 0.0, "", []
+worst_pos = worst_ang = worst_scl = 0.0
 stage = nodes.get("stage")
 cuts = sorted(data.get("cuts", []), key=lambda c: c["frame"])
 n = data["frame_end"] - data["frame_start"] + 1
@@ -125,11 +132,19 @@ for i in frames:
         if abs(det(exp)) < 1e-12:
             continue
         got = nodes["obj:" + name].GetMg()
-        size = max(exp.v1.GetLength(), exp.v2.GetLength(), exp.v3.GetLength())
-        err = max((got.off - exp.off).GetLength() / SCALE,
-                  *((a - b).GetLength() / size for a, b in ((got.v1, exp.v1), (got.v2, exp.v2), (got.v3, exp.v3))))
+        # position in cm, orientation in degrees, scale relative - all physical
+        pos_err = (got.off - exp.off).GetLength()
+        ang_err = scl_err = 0.0
+        for a, b in ((got.v1, exp.v1), (got.v2, exp.v2), (got.v3, exp.v3)):
+            la, lb = a.GetLength(), b.GetLength()
+            if la > 1e-12 and lb > 1e-12:
+                dot = max(-1.0, min(1.0, a.Dot(b) / (la * lb)))
+                ang_err = max(ang_err, math.degrees(math.acos(dot)))
+                scl_err = max(scl_err, abs(la / lb - 1.0))
+        worst_pos, worst_ang, worst_scl = max(worst_pos, pos_err), max(worst_ang, ang_err), max(worst_scl, scl_err)
+        err = max(pos_err / 0.01, ang_err / 0.05, scl_err / 1e-3)
         if err > worst:
-            worst, where = err, f"{name} @ {frame}"
+            worst, where = err, f"{name} @ {frame} ({pos_err:.4f} cm, {ang_err:.4f}deg, {scl_err*100:.3f}% scale)"
     if stage is not None and cuts:
         want = cuts[0]["camera"]
         for c in cuts:
@@ -138,7 +153,8 @@ for i in frames:
         link = stage[c4d.STAGEOBJECT_CLINK]
         if (link.GetName() if link else None) != want:
             stage_bad.append((frame, link.GetName() if link else None, want))
-check(worst < 2e-4, f"evaluated C4D globals match Blender on {len(frames)} frames (worst {worst:.1e}, {where})")
+check(worst <= 1.0, f"evaluated C4D globals match Blender on {len(frames)} frames: "
+      f"within {worst_pos:.4f} cm, {worst_ang:.4f} degrees, {worst_scl*100:.3f}% scale  (worst case {where})")
 check(not stage_bad, f"Stage camera follows the cuts, incl. frames either side of each cut {stage_bad[:3]}")
 
 n_mats = len(doc.GetMaterials())

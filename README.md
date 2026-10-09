@@ -7,9 +7,9 @@ animation, cameras, lights and marker camera cuts. The cuts become a Stage objec
 
 Download both zips from the [latest release](../../releases/latest).
 
-**Blender 5.0 / 5.2**: Edit › Preferences › Get Extensions › ⌄ › *Install from Disk…* → `camera_bridge_c4d-2.0.1.zip`
+**Blender 5.0 / 5.2**: Edit › Preferences › Get Extensions › ⌄ › *Install from Disk…* → `camera_bridge_c4d-2.2.0.zip`
 
-**Cinema 4D 2026**: unzip `CameraBridge_C4D-2.0.1.zip` into your Cinema 4D `plugins` folder (or add its folder under
+**Cinema 4D 2026**: unzip `CameraBridge_C4D-2.2.0.zip` into your Cinema 4D `plugins` folder (or add its folder under
 Preferences › Plugins) and restart. It appears as **Extensions › Import from Blender…**
 
 ## Use
@@ -20,6 +20,8 @@ Preferences › Plugins) and restart. It appears as **Extensions › Import from
    - **Scale**: centimetres per Blender unit in Cinema 4D (100 = real-world size). The importer fills in this
      value automatically, and you can still change it there before importing.
 2. Cinema 4D: **Extensions › Import from Blender…** → Choose… → Import.
+   - **Keep Blender's keyframes** (on by default): objects come in with the same keys, tangents and
+     curve shapes you have in Blender, instead of one key per frame. Turn it off to bake every frame.
    - Re-import the same .blend whenever animation changes. Everything updates in place, meshes that
      didn't change are skipped, and tags and materials you set up in Cinema 4D are kept.
 
@@ -29,7 +31,8 @@ Preferences › Plugins) and restart. It appears as **Extensions › Import from
 |---|---|
 | Collections (colour tags, render/viewport visibility) | Nested nulls with matching icon colours and visibility |
 | Object parenting | Same parenting |
-| Per-frame transforms (parents, constraints, drivers, NLA) | PSR keys, lossless reduction, no Euler flips |
+| Keyed loc/rot/scale (Bézier handles, constant keys) | The same keys and tangents, with a matching rotation order — editable curves |
+| Transforms that can't map 1:1 (constraints, drivers, NLA, quaternion keys, rotated parent-inverse) | Baked per-frame keys, lossless reduction, no Euler flips |
 | Scale 0 ↔ 1 switches (constant keys) | Step keys on the exact same frames |
 | Meshes: modifiers applied, n-gons, UVs, sharp/custom normals | Polygon objects with UVW, Normal and Phong tags |
 | Material slots | Polygon selections + texture tags; materials reused by name (new ones get the base colour) |
@@ -46,6 +49,9 @@ and collection instances (they come in as nulls).
 
 ## Versions
 
+- **2.2.0**: "Keep Blender's keyframes" — rebuilds your original keys, Bézier handles and interpolation in
+  Cinema 4D (matching rotation order per object), instead of a key on every frame. Anything that can't map
+  exactly still bakes, and the export lists which objects did.
 - **2.0.1**: Scale setting in the Blender exporter, picked up by the importer. Stage camera keys are now
   created the way Cinema 4D expects (no more console warnings during playback).
 - 2.0.0: full scene bridge.
@@ -56,4 +62,5 @@ and collection instances (they come in as nulls).
 - `tests/blender_scene_v2.py`: builds a shot-like scene headless, exports it and checks it against Blender's own evaluation
 - `tests/check_c4d_logic.py`: runs the importer's transform logic against Blender's world matrices, frame by frame
 - `tests/blender_export_file.py` + `tests/blender_dump_worlds.py`: the same checks on any real .blend
+- `tests/c4d_curve_match.py` (c4dpy): compares every rebuilt F-Curve against Blender's own evaluation, frame by frame
 - `tests/c4d_verify_v2.py` (c4dpy): imports inside Cinema 4D and checks every sampled frame, the Stage and re-imports

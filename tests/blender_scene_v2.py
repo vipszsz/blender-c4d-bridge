@@ -292,6 +292,26 @@ light = objs["Area"]["light"]["channels"]
 check(abs(light["size_x"] - 2.0) < 1e-6 and abs(light["size_y"] - 1.5) < 1e-6, "area light size includes scale")
 sc = [r[1] for r in objs["U18.A"]["m"]]
 check(len(objs["U18.A"]["m"]) == 2 or len(sc) >= 2, f"scale toggle is run-length encoded ({len(sc)} entries)")
+
+# Ground truth for the curve rebuild: every exported F-Curve evaluated per frame.
+from bpy_extras import anim_utils as _au
+truth_curves = {}
+for name, o in objs.items():
+    if "curves" not in o:
+        continue
+    ob = bpy.data.objects[name]
+    bag = _au.action_get_channelbag_for_slot(ob.animation_data.action, ob.animation_data.action_slot)
+    per_object = {}
+    for fc in (bag.fcurves if bag else []):
+        group = {"location": "loc", "rotation_euler": "rot", "scale": "scale"}.get(fc.data_path)
+        if group is None:
+            continue
+        per_object.setdefault(group, {})[str(fc.array_index)] = [
+            fc.evaluate(f) for f in range(man["frame_start"], man["frame_end"] + 1)]
+    truth_curves[name] = per_object
+with open(os.path.join(out_dir, "curve_truth.json"), "w") as fh:
+    json.dump(truth_curves, fh)
+
 worlds = {}
 for frame in range(man["frame_start"], man["frame_end"] + 1):
     scene.frame_set(frame)

@@ -81,7 +81,8 @@ def rle(values):
     return out
 
 
-def matrix_rows(m):
+def matrix_rows(m, precision=8):
+    _r = lambda v: round(float(v), precision)
     return [_r(m[0][0]), _r(m[0][1]), _r(m[0][2]), _r(m[0][3]),
             _r(m[1][0]), _r(m[1][1]), _r(m[1][2]), _r(m[1][3]),
             _r(m[2][0]), _r(m[2][1]), _r(m[2][2]), _r(m[2][3])]
@@ -401,6 +402,144 @@ def material_info(mat):
 
 
 # ---------------------------------------------------------------------------
+# Original keyframes (optional): Blender's own F-Curves instead of baked keys
+# ---------------------------------------------------------------------------
+
+EULER_ORDERS = {"XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"}
+CURVE_PATHS = {"location": "loc", "rotation_euler": "rot", "scale": "scale"}
+SUPPORTED_INTERPOLATION = {"BEZIER", "LINEAR", "CONSTANT"}
+IDENTITY = None  # set lazily to avoid importing mathutils at module level
+
+
+def _is_identity(m, tol=1e-6):
+    return all(abs(m[i][j] - (1.0 if i == j else 0.0)) <= tol for i in range(4) for j in range(4))
+
+
+def _axis_aligned(m, tol=1e-5):
+    """A parent-inverse that is only (positive) scale + translation can be folded into
+    the channel values; anything with rotation or mirroring cannot."""
+    for i in range(3):
+        for j in range(3):
+            if i != j and abs(m[i][j]) > tol:
+                return None
+        if m[i][i] <= tol:
+            return None
+    return [m[i][i] for i in range(3)], [m[i][3] for i in range(3)]
+
+
+def _fcurves_of(ob):
+    action_data = ob.animation_data
+    if action_data is None or action_data.action is None:
+        return None
+    try:
+        from bpy_extras import anim_utils
+        bag = anim_utils.action_get_channelbag_for_slot(action_data.action, action_data.action_slot)
+        return list(bag.fcurves) if bag else []
+    except (ImportError, AttributeError, TypeError):
+        return list(getattr(action_data.action, "fcurves", []))
+
+
+def object_curves(ob, kind, parent_exported):
+    """Blender's own keyframes for this object, ready for a 1:1 rebuild in Cinema 4D.
+
+    Returns (curves, None) or (None, reason). Everything that can't be reproduced
+    key-for-key - constraints, drivers, NLA, quaternion keys, exotic interpolation,
+    a rotating parent-inverse - is reported so the caller can bake that object instead.
+    """
+    if kind == "light":
+        return None, "lights keep baked keys"
+    if ob.parent is not None and not parent_exported:
+        return None, "parent not exported"
+    animation = ob.animation_data
+    if animation is None or animation.action is None:
+        return None, "no action"
+    if any(getattr(c, "enabled", True) for c in ob.constraints):
+        return None, "constraints"
+    if getattr(animation, "drivers", None) and len(animation.drivers):
+        return None, "drivers"
+    if any(track.strips for track in getattr(animation, "nla_tracks", [])):
+        return None, "NLA strips"
+    if any(abs(v) > 1e-9 for v in ob.delta_rotation_euler) or \
+            any(abs(v) > 1e-9 for v in (ob.delta_rotation_quaternion[1:] if ob.rotation_mode == 'QUATERNION' else ())):
+        return None, "delta rotation"
+
+    fcurves = _fcurves_of(ob) or []
+    channels = {"loc": {}, "rot": {}, "scale": {}}
+    for fc in fcurves:
+        if fc.data_path == "rotation_quaternion" and len(fc.keyframe_points):
+            return None, "quaternion keys"
+        if fc.data_path == "rotation_axis_angle" and len(fc.keyframe_points):
+            return None, "axis-angle keys"
+        group = CURVE_PATHS.get(fc.data_path)
+        if group is None or fc.mute or not len(fc.keyframe_points):
+            continue
+        if fc.modifiers:
+            return None, "F-Curve modifiers"
+        if group == "rot" and ob.rotation_mode not in EULER_ORDERS:
+            return None, f"rotation mode {ob.rotation_mode}"
+        for kp in fc.keyframe_points:
+            if kp.interpolation not in SUPPORTED_INTERPOLATION:
+                return None, f"{kp.interpolation.lower()} interpolation"
+        channels[group][fc.array_index] = fc
+    if not any(channels.values()):
+        return None, "no transform keys"
+
+    # Parent inverse and delta transforms are folded into the values, so Cinema 4D
+    # only has to permute axes: C4D (x, y, z) = Blender (x, z, y).
+    scale_fold, offset_fold, offset_matrix = [1.0, 1.0, 1.0], [0.0, 0.0, 0.0], None
+    if ob.parent is not None:
+        if ob.parent_type != 'OBJECT':
+            return None, f"{ob.parent_type.lower()} parenting"
+        mpi = ob.matrix_parent_inverse
+        if not _is_identity(mpi):
+            folded = _axis_aligned(mpi)
+            if folded is not None:
+                scale_fold, offset_fold = folded
+            else:
+                # A rotating parent-inverse can't fold into the channels; the importer
+                # puts it on a small static null between parent and object.
+                offset_matrix = matrix_rows(mpi)
+
+    loc_delta, scale_delta = list(ob.delta_location), list(ob.delta_scale)
+    basis_rotation = (list(ob.rotation_euler) if ob.rotation_mode in EULER_ORDERS
+                      else list(ob.matrix_basis.to_euler('XYZ')))
+    order = ob.rotation_mode if ob.rotation_mode in EULER_ORDERS else 'XYZ'
+
+    def fold(group, index):
+        """(factor, offset) applied to every value and handle of one channel."""
+        if group == "loc":
+            return scale_fold[index], scale_fold[index] * loc_delta[index] + offset_fold[index]
+        if group == "scale":
+            return scale_fold[index] * scale_delta[index], 0.0
+        return 1.0, 0.0
+
+    static = {
+        "loc": [_r(scale_fold[i] * (ob.location[i] + loc_delta[i]) + offset_fold[i]) for i in range(3)],
+        "rot": [_r(v) for v in basis_rotation],
+        "scale": [_r(scale_fold[i] * scale_delta[i] * ob.scale[i]) for i in range(3)],
+    }
+    out = {}
+    for group, curves in channels.items():
+        for index, fc in curves.items():
+            factor, offset = fold(group, index)
+            keys = []
+            for kp in fc.keyframe_points:
+                frame, value = kp.co
+                left, right = kp.handle_left, kp.handle_right
+                keys.append({
+                    "f": _r(frame), "v": _r(factor * value + offset), "i": kp.interpolation[0],  # B/L/C
+                    "l": [_r(left.x - frame), _r(factor * (left.y - value))],
+                    "r": [_r(right.x - frame), _r(factor * (right.y - value))],
+                })
+            keys.sort(key=lambda k: k["f"])
+            out.setdefault(group, {})[str(index)] = keys
+    curves = {"order": order, "static": static, "channels": out}
+    if offset_matrix is not None:
+        curves["offset"] = offset_matrix
+    return curves, None
+
+
+# ---------------------------------------------------------------------------
 # Export
 # ---------------------------------------------------------------------------
 
@@ -485,7 +624,7 @@ def export_bridge(context, filepath, mode='EVERYTHING', range_mode='SCENE', c4d_
         why = "changes topology" if ob in topology else "deforms"
         warnings.append(f"{ob.name} {why} over time; exported as a static mesh (frame {start}).")
 
-    out_objects = []
+    out_objects, n_curves, curve_fallbacks = [], 0, []
     for tr in tracks:
         ob = tr.ob
         entry = {
@@ -509,6 +648,12 @@ def export_bridge(context, filepath, mode='EVERYTHING', range_mode='SCENE', c4d_
             light = ob.data
             entry["light"] = {"type": light.type, "shape": getattr(light, "shape", "SQUARE"),
                               "channels": {k: pack_channel([s[k] for s in tr.samples]) for k in tr.samples[0]}}
+        curves, reason = object_curves(ob, tr.kind, tr.parent is not None or ob.parent is None)
+        if curves is not None:
+            entry["curves"] = curves
+            n_curves += 1
+        elif reason not in ("no action", "no transform keys", "lights keep baked keys"):
+            curve_fallbacks.append(f"{ob.name} ({reason})")
         if ob.type == 'EMPTY':
             entry["empty"] = {"display": ob.empty_display_type, "size": _r(ob.empty_display_size)}
             if ob.instance_type == 'COLLECTION' and ob.instance_collection:
@@ -550,8 +695,11 @@ def export_bridge(context, filepath, mode='EVERYTHING', range_mode='SCENE', c4d_
             zf.writestr(name, data)
     os.replace(tmp, filepath)
 
+    if curve_fallbacks:
+        shown = ", ".join(curve_fallbacks[:4]) + ("…" if len(curve_fallbacks) > 4 else "")
+        warnings.append(f"{len(curve_fallbacks)} objects keep baked keys instead of their own F-Curves: {shown}")
     stats = {
-        "objects": len(objects), "meshes": len(meshes), "cameras": sum(t.kind == "camera" for t in tracks),
+        "objects": len(objects), "curves": n_curves, "meshes": len(meshes), "cameras": sum(t.kind == "camera" for t in tracks),
         "lights": sum(t.kind == "light" for t in tracks), "cuts": len(manifest["cuts"]),
         "frames": len(frames), "collections": len(collections),
         "points": sum(m["points"] for m in meshes.values()), "bytes": os.path.getsize(filepath),
