@@ -23,6 +23,7 @@ import numpy as np
 
 FORMAT_ID = "camera-bridge"
 FORMAT_VERSION = 2
+ADDON_VERSION = "2.2.1"
 PRECISION = 6
 
 BLOB_EXT = {"points": "f32", "polys": "i32", "uv": "f32", "normals": "i16", "mats": "u16"}
@@ -664,6 +665,7 @@ def export_bridge(context, filepath, mode='EVERYTHING', range_mode='SCENE', c4d_
     manifest = {
         "format": FORMAT_ID,
         "version": FORMAT_VERSION,
+        "exporter": ADDON_VERSION,
         "source": {
             "application": "Blender",
             "blender_version": bpy.app.version_string,

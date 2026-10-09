@@ -7,9 +7,9 @@ animation, cameras, lights and marker camera cuts. The cuts become a Stage objec
 
 Download both zips from the [latest release](../../releases/latest).
 
-**Blender 5.0 / 5.2**: Edit › Preferences › Get Extensions › ⌄ › *Install from Disk…* → `camera_bridge_c4d-2.2.0.zip`
+**Blender 5.0 / 5.2**: Edit › Preferences › Get Extensions › ⌄ › *Install from Disk…* → `camera_bridge_c4d-2.2.1.zip`
 
-**Cinema 4D 2026**: unzip `CameraBridge_C4D-2.2.0.zip` into your Cinema 4D `plugins` folder (or add its folder under
+**Cinema 4D 2026**: unzip `CameraBridge_C4D-2.2.1.zip` into your Cinema 4D `plugins` folder (or add its folder under
 Preferences › Plugins) and restart. It appears as **Extensions › Import from Blender…**
 
 ## Use
@@ -49,6 +49,8 @@ and collection instances (they come in as nulls).
 
 ## Versions
 
+- **2.2.1**: every export records which add-on version wrote it, and the importer says plainly when a file
+  has no editable curves (it was written by an older add-on - restart Blender after installing a new one).
 - **2.2.0**: "Keep Blender's keyframes" — rebuilds your original keys, Bézier handles and interpolation in
   Cinema 4D (matching rotation order per object), instead of a key on every frame. Anything that can't map
   exactly still bakes, and the export lists which objects did.

@@ -28,6 +28,7 @@ PLUGIN_ID = 1000007
 
 FORMAT_ID = "camera-bridge"
 FORMAT_VERSION = 2
+PLUGIN_VERSION = "2.2.1"
 
 # Blender exports lens shift as fractions of frame width / height with +Y up.
 FILM_OFFSET_X_SIGN = 1.0
@@ -155,7 +156,12 @@ def describe(data):
                  f"{plural(kinds.count('light'), 'light')}")
     line1 += (f" · {data['fps']:g} fps · frames {data['frame_start']}–{data['frame_end']} · {w} × {h}")
     src = data.get("source", {})
-    line2 = f"{src.get('file', '?')} · scene “{src.get('scene', '?')}” · Blender {src.get('blender_version', '?')}"
+    exporter = data.get("exporter")
+    line2 = (f"{src.get('file', '?')} · scene “{src.get('scene', '?')}” · Blender {src.get('blender_version', '?')}"
+             f" · exported with {('Bridge ' + exporter) if exporter else 'an add-on older than 2.2'}")
+    animated = [o for o in objs if len(o.get("m", [])) > 1]
+    if animated and not any(o.get("curves") for o in objs):
+        line2 += "  —  no editable curves in this file"
     lines = []
     if cuts:
         width = max(len(str(c["frame"])) for c in cuts)
@@ -1100,6 +1106,9 @@ def import_bundle(doc, bundle, opt):
         parts.append(f"{skipped_geo} meshes unchanged")
     summary = (f"Imported {plural(len(objects), 'object')} ({', '.join(parts)}), {plural(n_cuts, 'cut')}, "
                f"{plural(n_markers, 'marker')} and {plural(keyer.keys, 'key')} into “{root_name}”.")
+    if opt.keep_curves and not curve_objects and any(len(o.get("m", [])) > 1 for o in objects):
+        warnings.append("This export has no editable curves, so every object was baked. Re-export from Blender "
+                        "with add-on 2.2 or newer (restart Blender after installing it).")
     if materials.created:
         summary += f" Created {plural(materials.created, 'material')}."
     return summary, warnings
@@ -1148,7 +1157,7 @@ class ImportDialog(gui.GeDialog):
         self.AddStaticText(0, c4d.BFH_LEFT, name=title, borderstyle=c4d.BORDER_WITH_TITLE_BOLD)
 
     def CreateLayout(self):
-        self.SetTitle("Import from Blender")
+        self.SetTitle(f"Import from Blender · {PLUGIN_VERSION}")
         self.GroupBegin(0, c4d.BFH_SCALEFIT | c4d.BFV_SCALEFIT, cols=1)
         self.GroupBorderSpace(14, 12, 14, 12)
         self.GroupSpace(0, 6)
@@ -1228,7 +1237,12 @@ class ImportDialog(gui.GeDialog):
             self.SetString(ID_SUMMARY, line1)
             self.SetString(ID_SOURCE, line2)
             self.SetString(ID_DETAILS, details)
-            self.SetString(ID_STATUS, "Ready to import.")
+            objects = self.bundle.data.get("objects", [])
+            if any(len(o.get("m", [])) > 1 for o in objects) and not any(o.get("curves") for o in objects):
+                self.SetString(ID_STATUS, "Ready — but this file has no editable curves: re-export from Blender "
+                                          "with add-on 2.2 or newer (restart Blender after installing).")
+            else:
+                self.SetString(ID_STATUS, "Ready to import.")
             # The scale chosen in Blender's export wins; it can still be changed here before importing.
             blender_scale = self.bundle.data.get("c4d_scale")
             if blender_scale:
