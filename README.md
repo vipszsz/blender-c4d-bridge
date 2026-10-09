@@ -7,9 +7,9 @@ animation, cameras, lights and marker camera cuts. The cuts become a Stage objec
 
 Download both zips from the [latest release](../../releases/latest).
 
-**Blender 5.0 / 5.2**: Edit › Preferences › Get Extensions › ⌄ › *Install from Disk…* → `camera_bridge_c4d-2.2.1.zip`
+**Blender 5.0 / 5.2**: Edit › Preferences › Get Extensions › ⌄ › *Install from Disk…* → `camera_bridge_c4d-2.3.0.zip`
 
-**Cinema 4D 2026**: unzip `CameraBridge_C4D-2.2.1.zip` into your Cinema 4D `plugins` folder (or add its folder under
+**Cinema 4D 2026**: unzip `CameraBridge_C4D-2.3.0.zip` into your Cinema 4D `plugins` folder (or add its folder under
 Preferences › Plugins) and restart. It appears as **Extensions › Import from Blender…**
 
 ## Use
@@ -38,7 +38,8 @@ Preferences › Plugins) and restart. It appears as **Extensions › Import from
 | Material slots | Polygon selections + texture tags; materials reused by name (new ones get the base colour) |
 | Meshes sharing data | Exported once |
 | Empties (display type/size) | Nulls with matching display |
-| Cameras (lens, sensor fit, shift, DOF, clipping) | Cameras |
+| Camera keys (lens, sensor, shift, focus distance, f-stop, clipping) | The same keys and tangents on the camera |
+| Light keys (colour, power, spot cone) | The same keys and tangents on the light |
 | Area/point/spot/sun lights (colour, size incl. scale, cone) | Lights (intensity in lumens = W × 683, approximate) |
 | Markers bound to cameras | Stage camera keys |
 | All markers | Timeline markers |
@@ -49,6 +50,9 @@ and collection instances (they come in as nulls).
 
 ## Versions
 
+- **2.3.0**: camera and light data channels keep Blender's own keys too - lens, sensor, shift, focus distance,
+  f-stop, clipping, light colour, power and spot cone. Also fixes animated light colour, which could not be
+  keyed at all before (colour parameters need a different track type in Cinema 4D).
 - **2.2.1**: every export records which add-on version wrote it, and the importer says plainly when a file
   has no editable curves (it was written by an older add-on - restart Blender after installing a new one).
 - **2.2.0**: "Keep Blender's keyframes" — rebuilds your original keys, Bézier handles and interpolation in

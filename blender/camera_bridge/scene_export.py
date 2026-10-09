@@ -23,7 +23,7 @@ import numpy as np
 
 FORMAT_ID = "camera-bridge"
 FORMAT_VERSION = 2
-ADDON_VERSION = "2.2.1"
+ADDON_VERSION = "2.3.0"
 PRECISION = 6
 
 BLOB_EXT = {"points": "f32", "polys": "i32", "uv": "f32", "normals": "i16", "mats": "u16"}
@@ -440,6 +440,64 @@ def _fcurves_of(ob):
         return list(getattr(action_data.action, "fcurves", []))
 
 
+def _curve_keys(fc, factor=1.0, offset=0.0):
+    """Blender F-Curve -> the same key/handle format used for transforms."""
+    keys = []
+    for kp in fc.keyframe_points:
+        if kp.interpolation not in SUPPORTED_INTERPOLATION:
+            return None
+        frame, value = kp.co
+        left, right = kp.handle_left, kp.handle_right
+        keys.append({"f": _r(frame), "v": _r(factor * value + offset), "i": kp.interpolation[0],
+                     "l": [_r(left.x - frame), _r(factor * (left.y - value))],
+                     "r": [_r(right.x - frame), _r(factor * (right.y - value))]})
+    keys.sort(key=lambda k: k["f"])
+    return keys
+
+
+def data_curves(ob, kind, width, height):
+    """Keys on the camera or light data itself: lens, focus, clipping, colour, cone.
+
+    Only channels that map to a single Cinema 4D parameter by a constant factor are
+    returned; the rest keep their baked keys.
+    """
+    data = ob.data
+    animation = getattr(data, "animation_data", None)
+    if animation is None or animation.action is None:
+        return {}
+    aspect = width / height
+    if kind == "camera":
+        fit = data.sensor_fit
+        horizontal = (width >= height) if fit == 'AUTO' else (fit == 'HORIZONTAL')
+        targets = {
+            "lens": ("lens", 1.0), "clip_start": ("clip_start", 1.0), "clip_end": ("clip_end", 1.0),
+            "dof.aperture_fstop": ("fstop", 1.0),
+            "shift_x": ("offset_x", 1.0 if horizontal else 1.0 / aspect),
+            "shift_y": ("offset_y", aspect if horizontal else 1.0),
+            ("sensor_height" if fit == 'VERTICAL' else "sensor_width"): ("gate", 1.0 if horizontal else aspect),
+        }
+        if data.dof.focus_object is None:
+            targets["dof.focus_distance"] = ("focus_distance", 1.0)
+    else:
+        targets = {"color": ("color", 1.0), "energy": ("energy", 1.0)}
+        if data.type == 'SPOT':
+            targets["spot_size"] = ("spot_size", 1.0)
+    out = {}
+    for fc in _fcurves_of(data) or []:
+        target = targets.get(fc.data_path)
+        if target is None or fc.mute or fc.modifiers or not len(fc.keyframe_points):
+            continue
+        name, factor = target
+        keys = _curve_keys(fc, factor)
+        if keys is None:
+            continue
+        if name == "color":
+            out.setdefault("color", {})[str(fc.array_index)] = keys
+        else:
+            out[name] = keys
+    return out
+
+
 def object_curves(ob, kind, parent_exported):
     """Blender's own keyframes for this object, ready for a 1:1 rebuild in Cinema 4D.
 
@@ -642,13 +700,15 @@ def export_bridge(context, filepath, mode='EVERYTHING', range_mode='SCENE', c4d_
         elif tr.kind == "camera":
             cam = ob.data
             entry["camera"] = {"type": cam.type, "use_dof": bool(cam.dof.use_dof),
-                               "channels": {k: pack_channel([s[k] for s in tr.samples]) for k in tr.samples[0]}}
+                               "channels": {k: pack_channel([s[k] for s in tr.samples]) for k in tr.samples[0]},
+                               "curves": data_curves(ob, "camera", *frame_size(scene))}
             if cam.type == 'PANO':
                 warnings.append(f"{ob.name}: panoramic cameras import as perspective.")
         elif tr.kind == "light":
             light = ob.data
             entry["light"] = {"type": light.type, "shape": getattr(light, "shape", "SQUARE"),
-                              "channels": {k: pack_channel([s[k] for s in tr.samples]) for k in tr.samples[0]}}
+                              "channels": {k: pack_channel([s[k] for s in tr.samples]) for k in tr.samples[0]},
+                              "curves": data_curves(ob, "light", *frame_size(scene))}
         curves, reason = object_curves(ob, tr.kind, tr.parent is not None or ob.parent is None)
         if curves is not None:
             entry["curves"] = curves

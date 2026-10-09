@@ -194,6 +194,26 @@ light.location = (3, -3, 4)
 light.rotation_euler = (0.8, 0, 0.6)
 light.scale = (2.0, 3.0, 1.0)
 
+
+# Animated camera data and light data (lens, focus, colour, energy)
+cam_a.data.lens = 35.0
+cam_a.data.keyframe_insert("lens", frame=1)
+cam_a.data.lens = 85.0
+cam_a.data.keyframe_insert("lens", frame=60)
+cam_a.data.dof.use_dof = True
+cam_a.data.dof.focus_distance = 5.0
+cam_a.data.dof.keyframe_insert("focus_distance", frame=1)
+cam_a.data.dof.focus_distance = 2.0
+cam_a.data.dof.keyframe_insert("focus_distance", frame=90)
+ldata.color = (1.0, 0.5, 0.2)
+ldata.keyframe_insert("color", frame=1)
+ldata.color = (0.2, 0.4, 1.0)
+ldata.keyframe_insert("color", frame=90)
+ldata.energy = 50.0
+ldata.keyframe_insert("energy", frame=1)
+ldata.energy = 200.0
+ldata.keyframe_insert("energy", frame=70)
+
 scene.camera = cam_a
 scene.timeline_markers.new("F_01", frame=1).camera = cam_a
 scene.timeline_markers.new("F_41", frame=41).camera = cam_b
@@ -311,6 +331,25 @@ for name, o in objs.items():
     truth_curves[name] = per_object
 with open(os.path.join(out_dir, "curve_truth.json"), "w") as fh:
     json.dump(truth_curves, fh)
+
+
+# Ground truth for camera/light data channels
+data_truth = {}
+for ob in (cam_a, cam_b, bpy.data.objects["Area"]):
+    ad = getattr(ob.data, "animation_data", None)
+    if ad is None or ad.action is None:
+        continue
+    bag = _au.action_get_channelbag_for_slot(ad.action, ad.action_slot)
+    per = {}
+    for fc in (bag.fcurves if bag else []):
+        name = fc.data_path.split(".")[-1]
+        key = f"{name}{fc.array_index}" if fc.array_index and name == "color" else name
+        if name == "color":
+            key = f"color{fc.array_index}"
+        per[key] = [fc.evaluate(f) for f in range(man["frame_start"], man["frame_end"] + 1)]
+    data_truth[ob.name] = per
+with open(os.path.join(out_dir, "data_truth.json"), "w") as fh:
+    json.dump(data_truth, fh)
 
 worlds = {}
 for frame in range(man["frame_start"], man["frame_end"] + 1):

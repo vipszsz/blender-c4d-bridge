@@ -28,7 +28,7 @@ PLUGIN_ID = 1000007
 
 FORMAT_ID = "camera-bridge"
 FORMAT_VERSION = 2
-PLUGIN_VERSION = "2.2.1"
+PLUGIN_VERSION = "2.3.0"
 
 # Blender exports lens shift as fractions of frame width / height with +Y up.
 FILM_OFFSET_X_SIGN = 1.0
@@ -302,6 +302,12 @@ def vector_id(param, component):
                       c4d.DescLevel(component, c4d.DTYPE_REAL, 0))
 
 
+def color_id(param, component):
+    """Colour parameters are DTYPE_COLOR, not DTYPE_VECTOR: a vector DescID can't make a track."""
+    return c4d.DescID(c4d.DescLevel(param, c4d.DTYPE_COLOR, 0),
+                      c4d.DescLevel(component, c4d.DTYPE_REAL, 0))
+
+
 def real_id(param):
     return c4d.DescID(c4d.DescLevel(param, c4d.DTYPE_REAL, 0))
 
@@ -559,13 +565,26 @@ def set_icon_color(obj, rgb):
         pass
 
 
+def data_channel(obj, descid, name, baked, eps, curves, keyer, factor=1.0, offset=0.0):
+    """One camera/light parameter: Blender's own keys when they map 1:1, else baked."""
+    keys = (curves or {}).get(name)
+    if keys:
+        write_curve_track(obj, descid, keys, factor, offset, keyer)
+    else:
+        keyer.channel(obj, descid, baked, eps)
+
+
 def apply_camera(obj, cam, keyer, opt, warnings, name):
     n = len(keyer.frames)
     ch = cam.get("channels", {})
+    curves = cam.get("curves") if opt.keep_curves else None
     s = opt.scale
 
     def values(key, default):
         return channel_values(ch, key, default, n)
+
+    def channel(descid, key, baked, eps, factor=1.0, offset=0.0):
+        data_channel(obj, descid, key, baked, eps, curves, keyer, factor, offset)
 
     kind = cam.get("type", "PERSP")
     ortho = kind == "ORTHO"
@@ -578,27 +597,27 @@ def apply_camera(obj, cam, keyer, opt, warnings, name):
     obj[c4d.CAMERAOBJECT_FNUMBER] = c4d.CAMERAOBJECT_FNUMBER_CUSTOM
     obj[c4d.CAMERAOBJECT_USETARGETOBJECT] = False
 
-    keyer.channel(obj, real_id(c4d.CAMERA_FOCUS),
-                  [min(max(v, 1.0), 10000.0) for v in values("lens", 50.0)], EPS_LENS)
-    keyer.channel(obj, real_id(c4d.CAMERAOBJECT_APERTURE),
-                  [min(max(v, 1.0), 2000.0) for v in values("gate", 36.0)], EPS_LENS)
-    keyer.channel(obj, real_id(c4d.CAMERAOBJECT_FILM_OFFSET_X),
-                  [FILM_OFFSET_X_SIGN * v for v in values("offset_x", 0.0)], EPS_OTHER)
-    keyer.channel(obj, real_id(c4d.CAMERAOBJECT_FILM_OFFSET_Y),
-                  [FILM_OFFSET_Y_SIGN * v for v in values("offset_y", 0.0)], EPS_OTHER)
+    channel(real_id(c4d.CAMERA_FOCUS), "lens",
+            [min(max(v, 1.0), 10000.0) for v in values("lens", 50.0)], EPS_LENS)
+    channel(real_id(c4d.CAMERAOBJECT_APERTURE), "gate",
+            [min(max(v, 1.0), 2000.0) for v in values("gate", 36.0)], EPS_LENS)
+    channel(real_id(c4d.CAMERAOBJECT_FILM_OFFSET_X), "offset_x",
+            [FILM_OFFSET_X_SIGN * v for v in values("offset_x", 0.0)], EPS_OTHER, FILM_OFFSET_X_SIGN)
+    channel(real_id(c4d.CAMERAOBJECT_FILM_OFFSET_Y), "offset_y",
+            [FILM_OFFSET_Y_SIGN * v for v in values("offset_y", 0.0)], EPS_OTHER, FILM_OFFSET_Y_SIGN)
     if ortho:
         keyer.channel(obj, real_id(c4d.CAMERA_ZOOM),
                       [ORTHO_REFERENCE_WIDTH / max(v * s, 1e-6) for v in values("ortho_width", 6.0)], EPS_OTHER)
-    keyer.channel(obj, real_id(c4d.CAMERAOBJECT_TARGETDISTANCE),
-                  [max(v * s, 0.01) for v in values("focus_distance", 10.0)], keyer.pos_eps)
-    keyer.channel(obj, real_id(c4d.CAMERAOBJECT_FNUMBER_VALUE), values("fstop", 2.8), EPS_OTHER)
+    channel(real_id(c4d.CAMERAOBJECT_TARGETDISTANCE), "focus_distance",
+            [max(v * s, 0.01) for v in values("focus_distance", 10.0)], keyer.pos_eps, s)
+    channel(real_id(c4d.CAMERAOBJECT_FNUMBER_VALUE), "fstop", values("fstop", 2.8), EPS_OTHER)
 
     near_id, far_id = real_id(c4d.CAMERAOBJECT_NEAR_CLIPPING), real_id(c4d.CAMERAOBJECT_FAR_CLIPPING)
     obj[c4d.CAMERAOBJECT_NEAR_CLIPPING_ENABLE] = opt.clipping
     obj[c4d.CAMERAOBJECT_FAR_CLIPPING_ENABLE] = opt.clipping
     if opt.clipping:
-        keyer.channel(obj, near_id, [v * s for v in values("clip_start", 0.1)], keyer.pos_eps)
-        keyer.channel(obj, far_id, [v * s for v in values("clip_end", 100.0)], keyer.pos_eps)
+        channel(near_id, "clip_start", [v * s for v in values("clip_start", 0.1)], keyer.pos_eps, s)
+        channel(far_id, "clip_end", [v * s for v in values("clip_end", 100.0)], keyer.pos_eps, s)
     else:
         remove_track(obj, near_id)
         remove_track(obj, far_id)
@@ -611,24 +630,27 @@ LIGHT_TYPES = {"POINT": "LIGHT_TYPE_OMNI", "SPOT": "LIGHT_TYPE_SPOT", "SUN": "LI
 def apply_light(obj, light, keyer, opt):
     n = len(keyer.frames)
     ch = light.get("channels", {})
+    curves = light.get("curves") if opt.keep_curves else None
     kind = light.get("type", "POINT")
     obj[c4d.LIGHT_TYPE] = getattr(c4d, LIGHT_TYPES.get(kind, "LIGHT_TYPE_OMNI"))
     obj[c4d.LIGHT_SHADOWTYPE] = c4d.LIGHT_SHADOWTYPE_AREA
 
     colors = channel_values(ch, "color", [1.0, 1.0, 1.0], n)
+    color_curves = (curves or {}).get("color") or {}
     for comp, idx in ((c4d.VECTOR_X, 0), (c4d.VECTOR_Y, 1), (c4d.VECTOR_Z, 2)):
-        keyer.channel(obj, vector_id(c4d.LIGHT_COLOR, comp), [c[idx] for c in colors], EPS_OTHER)
+        data_channel(obj, color_id(c4d.LIGHT_COLOR, comp), str(idx), [c[idx] for c in colors], EPS_OTHER,
+                     color_curves, keyer)
 
     energy = channel_values(ch, "energy", 10.0, n)
     if kind == "SUN":
         obj[c4d.LIGHT_PHOTOMETRIC_UNITS] = False
-        keyer.channel(obj, real_id(c4d.LIGHT_BRIGHTNESS), energy, EPS_OTHER)
+        data_channel(obj, real_id(c4d.LIGHT_BRIGHTNESS), "energy", energy, EPS_OTHER, curves, keyer)
     else:
         obj[c4d.LIGHT_DETAILS_FALLOFF] = c4d.LIGHT_DETAILS_FALLOFF_INVERSESQUARE
         obj[c4d.LIGHT_PHOTOMETRIC_UNITS] = True
         obj[c4d.LIGHT_PHOTOMETRIC_UNIT] = c4d.LIGHT_PHOTOMETRIC_UNIT_LUMEN
-        keyer.channel(obj, real_id(c4d.LIGHT_PHOTOMETRIC_INTENSITY),
-                      [e * LUMENS_PER_WATT for e in energy], EPS_OTHER)
+        data_channel(obj, real_id(c4d.LIGHT_PHOTOMETRIC_INTENSITY), "energy",
+                     [e * LUMENS_PER_WATT for e in energy], EPS_OTHER, curves, keyer, LUMENS_PER_WATT)
 
     if kind == "AREA":
         shape = light.get("shape", "SQUARE")
@@ -642,7 +664,7 @@ def apply_light(obj, light, keyer, opt):
         sizes = channel_values(ch, "spot_size", 0.785, n)
         blends = channel_values(ch, "spot_blend", 0.15, n)
         obj[c4d.LIGHT_DETAILS_INNERCONE] = True
-        keyer.channel(obj, real_id(c4d.LIGHT_DETAILS_OUTERANGLE), sizes, EPS_ROTATION)
+        data_channel(obj, real_id(c4d.LIGHT_DETAILS_OUTERANGLE), "spot_size", sizes, EPS_ROTATION, curves, keyer)
         keyer.channel(obj, real_id(c4d.LIGHT_DETAILS_INNERANGLE),
                       [s * (1.0 - b) for s, b in zip(sizes, blends)], EPS_ROTATION)
 

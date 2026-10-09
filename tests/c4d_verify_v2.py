@@ -117,6 +117,9 @@ def det(m):
 fps = doc.GetFps()
 worst, where, stage_bad = 0.0, "", []
 worst_pos = worst_ang = worst_scl = 0.0
+data_truth_path = os.path.join(os.path.dirname(worlds_path), "data_truth.json")
+data_truth = json.load(open(data_truth_path)) if os.path.exists(data_truth_path) else {}
+data_bad = []
 stage = nodes.get("stage")
 cuts = sorted(data.get("cuts", []), key=lambda c: c["frame"])
 n = data["frame_end"] - data["frame_start"] + 1
@@ -145,6 +148,25 @@ for i in frames:
         err = max(pos_err / 0.01, ang_err / 0.05, scl_err / 1e-3)
         if err > worst:
             worst, where = err, f"{name} @ {frame} ({pos_err:.4f} cm, {ang_err:.4f}deg, {scl_err*100:.3f}% scale)"
+    for name, channels in data_truth.items():
+        obj = nodes.get("obj:" + name)
+        if obj is None:
+            continue
+        checks = {"lens": (c4d.CAMERA_FOCUS, 1.0, 1e-3),
+                  "focus_distance": (c4d.CAMERAOBJECT_TARGETDISTANCE, SCALE, 0.01),
+                  "energy": (c4d.LIGHT_PHOTOMETRIC_INTENSITY, 683.0, 0.5),
+                  "color0": (None, 1.0, 1e-4), "color1": (None, 1.0, 1e-4), "color2": (None, 1.0, 1e-4)}
+        for channel, values in channels.items():
+            if channel not in checks:
+                continue
+            param, factor, tol = checks[channel]
+            want = values[i] * factor
+            if param is None:
+                got = obj[c4d.LIGHT_COLOR][int(channel[-1])]
+            else:
+                got = obj[param]
+            if abs(got - want) > tol:
+                data_bad.append((name, channel, frame, round(got, 4), round(want, 4)))
     if stage is not None and cuts:
         want = cuts[0]["camera"]
         for c in cuts:
@@ -155,6 +177,7 @@ for i in frames:
             stage_bad.append((frame, link.GetName() if link else None, want))
 check(worst <= 1.0, f"evaluated C4D globals match Blender on {len(frames)} frames: "
       f"within {worst_pos:.4f} cm, {worst_ang:.4f} degrees, {worst_scl*100:.3f}% scale  (worst case {where})")
+check(not data_bad, f"camera/light data channels match Blender ({len(data_truth)} data blocks) {data_bad[:3]}")
 check(not stage_bad, f"Stage camera follows the cuts, incl. frames either side of each cut {stage_bad[:3]}")
 
 n_mats = len(doc.GetMaterials())
